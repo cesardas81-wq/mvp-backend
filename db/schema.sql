@@ -62,7 +62,8 @@ CREATE TABLE financings (
   name VARCHAR(150) NOT NULL,
   total_installments INT NOT NULL CHECK (total_installments > 0),
   installment_value NUMERIC(12,2) NOT NULL CHECK (installment_value > 0),
-  start_date DATE NOT NULL,
+  start_date DATE NOT NULL, -- data de início do contrato (referência/exibição)
+  due_day INT NOT NULL CHECK (due_day BETWEEN 1 AND 31), -- dia do mês em que a parcela vence
   created_at TIMESTAMP DEFAULT now()
 );
 
