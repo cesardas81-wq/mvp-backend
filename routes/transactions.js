@@ -101,12 +101,27 @@ router.get("/resumo-categorias", asyncHandler(async (req, res) => {
   res.json(result.rows);
 }));
 
-// PATCH /transactions/:id — edição manual (corrige categoria, valor ou descrição)
+// GET /transactions/:id — busca um lançamento específico (usado na edição)
+router.get("/:id", asyncHandler(async (req, res) => {
+  if (!isValidUUID(req.params.id)) {
+    return res.status(400).json({ erro: "Identificador inválido." });
+  }
+  const result = await db.query(
+    `SELECT id, description, amount, type, transaction_date FROM transactions WHERE id = $1 AND user_id = $2`,
+    [req.params.id, req.user.id]
+  );
+  if (!result.rows[0]) {
+    return res.status(404).json({ erro: "Lançamento não encontrado." });
+  }
+  res.json(result.rows[0]);
+}));
+
+// PATCH /transactions/:id — edição manual (corrige tipo, valor, descrição ou data)
 // Toda correção é registrada em correction_history para alimentar o aprendizado da IA
 router.patch("/:id", asyncHandler(async (req, res) => {
   const userId = req.user.id;
   const { id } = req.params;
-  const { category_id, amount, description } = req.body;
+  const { category_id, amount, description, type, transaction_date } = req.body;
 
   if (!isValidUUID(id)) {
     return res.status(400).json({ erro: "Identificador inválido." });
@@ -114,7 +129,7 @@ router.patch("/:id", asyncHandler(async (req, res) => {
 
   // Busca já filtrando pelo dono — impede que um usuário edite lançamento de outro
   const original = await db.query(
-    `SELECT description, amount, category_id, source FROM transactions WHERE id = $1 AND user_id = $2`,
+    `SELECT description, amount, category_id, source, type, transaction_date FROM transactions WHERE id = $1 AND user_id = $2`,
     [id, userId]
   );
   const antes = original.rows[0];
@@ -128,6 +143,12 @@ router.patch("/:id", asyncHandler(async (req, res) => {
   if (description !== undefined && (typeof description !== "string" || description.trim() === "")) {
     return res.status(400).json({ erro: "A descrição não pode ficar vazia." });
   }
+  if (type !== undefined && !["entrada", "saida"].includes(type)) {
+    return res.status(400).json({ erro: "Tipo inválido." });
+  }
+  if (transaction_date !== undefined && isNaN(new Date(transaction_date).getTime())) {
+    return res.status(400).json({ erro: "Data inválida." });
+  }
   if (category_id && !(await categoriaValida(category_id, userId))) {
     return res.status(403).json({ erro: "Categoria inválida para este usuário." });
   }
@@ -136,9 +157,11 @@ router.patch("/:id", asyncHandler(async (req, res) => {
     `UPDATE transactions SET
        category_id = COALESCE($1, category_id),
        amount = COALESCE($2, amount),
-       description = COALESCE($3, description)
-     WHERE id = $4 AND user_id = $5`,
-    [category_id, amount, description, id, userId]
+       description = COALESCE($3, description),
+       type = COALESCE($4, type),
+       transaction_date = COALESCE($5, transaction_date)
+     WHERE id = $6 AND user_id = $7`,
+    [category_id, amount, description, type, transaction_date, id, userId]
   );
 
   // Registra a correção no histórico apenas para lançamentos originados por voz —
