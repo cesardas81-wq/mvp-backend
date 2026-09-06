@@ -52,6 +52,8 @@ app.use((req, res, next) => {
 app.use("/accounts", require("./routes/accounts"));
 app.use("/transactions", require("./routes/transactions"));
 app.use("/financings", require("./routes/financings"));
+app.use("/recurring", require("./routes/recurring"));
+app.use("/compromissos", require("./routes/compromissos"));
 app.use("/voice", require("./routes/voice"));
 
 // Rota não encontrada
