@@ -24,7 +24,16 @@ async function categoriaValida(categoryId, userId) {
 // POST /transactions — lançamento manual
 router.post("/", asyncHandler(async (req, res) => {
   const userId = req.user.id;
-  const { account_id, category_id, description, amount, type, transaction_date } = req.body;
+  const {
+    account_id,
+    category_id,
+    description,
+    amount,
+    type,
+    transaction_date,
+    tipo_saida,
+    tipo_entrada,
+  } = req.body;
 
   if (
     !isValidUUID(account_id) ||
@@ -37,6 +46,15 @@ router.post("/", asyncHandler(async (req, res) => {
   }
   if (transaction_date !== undefined && isNaN(new Date(transaction_date).getTime())) {
     return res.status(400).json({ erro: "Data da transação inválida." });
+  }
+  // tipo_saida só se aplica a saídas do tipo "débito" ou "despesa à vencer" —
+  // financiamento/parcelamento/recorrente são cadastrados em suas próprias
+  // rotas (/financings, /recurring), não como uma linha de transactions
+  if (type === "saida" && tipo_saida && !["debito", "despesa_a_vencer"].includes(tipo_saida)) {
+    return res.status(400).json({ erro: "Tipo de saída inválido." });
+  }
+  if (type === "entrada" && tipo_entrada !== undefined && typeof tipo_entrada !== "string") {
+    return res.status(400).json({ erro: "Tipo de entrada inválido." });
   }
 
   // Confere que a conta informada realmente pertence a este usuário, antes de gravar
@@ -54,9 +72,19 @@ router.post("/", asyncHandler(async (req, res) => {
 
   const result = await db.query(
     `INSERT INTO transactions
-      (user_id, account_id, category_id, description, amount, type, source, transaction_date)
-     VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7) RETURNING id`,
-    [userId, account_id, category_id || null, description, amount, type, transaction_date || new Date()]
+      (user_id, account_id, category_id, description, amount, type, tipo_saida, tipo_entrada, source, transaction_date)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'manual', $9) RETURNING id`,
+    [
+      userId,
+      account_id,
+      category_id || null,
+      description,
+      amount,
+      type,
+      type === "saida" ? tipo_saida || "debito" : null,
+      type === "entrada" ? tipo_entrada || null : null,
+      transaction_date || new Date(),
+    ]
   );
 
   res.json({ sucesso: true, transaction_id: result.rows[0].id });
@@ -68,7 +96,8 @@ router.get("/", asyncHandler(async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100); // trava um teto sensato
 
   const result = await db.query(
-    `SELECT t.id, t.description, t.amount, t.type, t.source, t.transaction_date, c.name AS category
+    `SELECT t.id, t.description, t.amount, t.type, t.tipo_saida, t.tipo_entrada,
+            t.source, t.transaction_date, c.name AS category
      FROM transactions t
      LEFT JOIN categories c ON c.id = t.category_id
      WHERE t.user_id = $1
@@ -85,13 +114,12 @@ router.get("/resumo-categorias", asyncHandler(async (req, res) => {
   const userId = req.user.id;
 
   // LEFT JOIN (não INNER) — um lançamento sem categoria não pode sumir do
-  // resumo silenciosamente, senão o total do gráfico de rosca fica menor
-  // que o total real de gastos do mês, sem nenhum aviso disso ao usuário
+  // resumo silenciosamente. Também só considera até hoje, mesma regra do saldo.
   const result = await db.query(
     `SELECT COALESCE(c.name, 'Sem categoria') AS category, SUM(t.amount) AS total
      FROM transactions t
      LEFT JOIN categories c ON c.id = t.category_id
-     WHERE t.user_id = $1 AND t.type = 'saida'
+     WHERE t.user_id = $1 AND t.type = 'saida' AND t.transaction_date <= CURRENT_DATE
        AND date_trunc('month', t.transaction_date) = date_trunc('month', CURRENT_DATE)
      GROUP BY COALESCE(c.name, 'Sem categoria')
      ORDER BY total DESC`,
@@ -107,7 +135,8 @@ router.get("/:id", asyncHandler(async (req, res) => {
     return res.status(400).json({ erro: "Identificador inválido." });
   }
   const result = await db.query(
-    `SELECT id, description, amount, type, transaction_date FROM transactions WHERE id = $1 AND user_id = $2`,
+    `SELECT id, description, amount, type, tipo_saida, tipo_entrada, transaction_date
+     FROM transactions WHERE id = $1 AND user_id = $2`,
     [req.params.id, req.user.id]
   );
   if (!result.rows[0]) {
@@ -121,7 +150,7 @@ router.get("/:id", asyncHandler(async (req, res) => {
 router.patch("/:id", asyncHandler(async (req, res) => {
   const userId = req.user.id;
   const { id } = req.params;
-  const { category_id, amount, description, type, transaction_date } = req.body;
+  const { category_id, amount, description, type, transaction_date, tipo_saida, tipo_entrada } = req.body;
 
   if (!isValidUUID(id)) {
     return res.status(400).json({ erro: "Identificador inválido." });
@@ -149,6 +178,12 @@ router.patch("/:id", asyncHandler(async (req, res) => {
   if (transaction_date !== undefined && isNaN(new Date(transaction_date).getTime())) {
     return res.status(400).json({ erro: "Data inválida." });
   }
+  if (tipo_saida !== undefined && !["debito", "despesa_a_vencer"].includes(tipo_saida)) {
+    return res.status(400).json({ erro: "Tipo de saída inválido." });
+  }
+  if (tipo_entrada !== undefined && typeof tipo_entrada !== "string") {
+    return res.status(400).json({ erro: "Tipo de entrada inválido." });
+  }
   if (category_id && !(await categoriaValida(category_id, userId))) {
     return res.status(403).json({ erro: "Categoria inválida para este usuário." });
   }
@@ -159,9 +194,11 @@ router.patch("/:id", asyncHandler(async (req, res) => {
        amount = COALESCE($2, amount),
        description = COALESCE($3, description),
        type = COALESCE($4, type),
-       transaction_date = COALESCE($5, transaction_date)
-     WHERE id = $6 AND user_id = $7`,
-    [category_id, amount, description, type, transaction_date, id, userId]
+       transaction_date = COALESCE($5, transaction_date),
+       tipo_saida = COALESCE($6, tipo_saida),
+       tipo_entrada = COALESCE($7, tipo_entrada)
+     WHERE id = $8 AND user_id = $9`,
+    [category_id, amount, description, type, transaction_date, tipo_saida, tipo_entrada, id, userId]
   );
 
   // Registra a correção no histórico apenas para lançamentos originados por voz —
